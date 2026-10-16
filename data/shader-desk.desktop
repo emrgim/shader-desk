@@ -1,0 +1,8 @@
+[Desktop Entry]
+Name=Shader Desk
+Comment=Pick Hyprland screen shaders (CRT, phosphor) and per-theme shaders
+Exec=/home/emiliano/.local/bin/shader-desk
+StartupWMClass=emrgim.ShaderDesk
+Icon=video-display
+Type=Application
+Categories=Settings;

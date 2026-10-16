@@ -383,7 +383,7 @@ impl App {
 }
 
 fn gui(editor: bool) {
-    let app = adw::Application::builder().application_id("dev.emiliano.ShaderDesk").build();
+    let app = adw::Application::builder().application_id("emrgim.ShaderDesk").build();
     app.connect_activate(move |app| {
         if let Some(w) = app.active_window() { w.present(); return; }
         adw::StyleManager::default().set_color_scheme(adw::ColorScheme::ForceDark);

@@ -26,4 +26,5 @@ App ID: `emrgim.ShaderDesk`. All of Emiliano's projects use the `emrgim.*` ID pr
 ```sh
 cargo build --release
 install -Dm755 target/release/shader-desk ~/.local/bin/shader-desk
+install -Dm644 data/shader-desk.desktop ~/.local/share/applications/shader-desk.desktop
 ```
