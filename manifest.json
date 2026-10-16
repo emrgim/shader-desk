@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "id": "emrgim.ShaderDesk",
+  "name": "Shader Desk",
+  "version": "1.0.0",
+  "author": "Emiliano",
+  "license": "MIT",
+  "description": "Match a Hyprland screen shader to each Omarchy theme.",
+  "kinds": ["bar-widget"],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Shader Desk",
+    "category": "Appearance",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}
