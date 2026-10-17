@@ -1,5 +1,5 @@
 #!/bin/bash
-# emrgim.ShaderDesk: shaders, themes, current theme, and current screen shader.
+# emrgim.shader-desk: shaders, themes, current theme, and current screen shader.
 
 set -u
 

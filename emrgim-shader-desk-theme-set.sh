@@ -1,5 +1,5 @@
 #!/bin/bash
-# emrgim.ShaderDesk theme-set hook.
+# emrgim.shader-desk theme-set hook.
 # omarchy-hook theme-set passes the theme name as $1.
 
 set -u
