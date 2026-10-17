@@ -1,0 +1,3 @@
+#!/bin/bash
+# Demo fixture: a short, fixed theme list instead of the real installation.
+printf '%s\n' "Gruvbox" "Retro 82" "Tokyo Night"

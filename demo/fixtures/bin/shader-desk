@@ -1,0 +1,3 @@
+#!/bin/bash
+# Demo fixture stand-in for the optional native app; it does nothing.
+exit 0
