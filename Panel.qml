@@ -5,11 +5,11 @@ import qs.Commons
 import qs.Ui
 import "Model.js" as Model
 
-// Theme/shader picker for emrgim.ShaderDesk. Choosing a shader writes
+// Theme/shader picker for emrgim.shader-desk. Choosing a shader writes
 // ~/.config/shader-desk/theme-shaders.conf and installs the theme-set hook.
 Panel {
   id: root
-  moduleName: "emrgim.ShaderDesk"
+  moduleName: "emrgim.shader-desk"
   manageIpc: false
 
   property var anchorItem: null

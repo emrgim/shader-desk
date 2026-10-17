@@ -1,13 +1,13 @@
 import QtQuick
 import qs.Ui
 
-// Bar entry for emrgim.ShaderDesk. The shell loads this file from the
+// Bar entry for emrgim.shader-desk. The shell loads this file from the
 // manifest and routes summon/hide to open() and close(). Panel.qml is the
 // details surface, loaded here the same way the clock bar widget loads its
 // calendar.
 BarWidget {
   id: root
-  moduleName: "emrgim.ShaderDesk"
+  moduleName: "emrgim.shader-desk"
 
   readonly property bool opened: panelLoader.item
     ? panelLoader.item.opened === true
