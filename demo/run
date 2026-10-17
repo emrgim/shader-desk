@@ -1,0 +1,129 @@
+#!/bin/bash
+# Deterministic Shader Desk preview capture.
+#
+# Runs the real Omarchy shell (Quickshell) inside a headless sway session with
+# an isolated, throwaway HOME full of fictional fixtures, enables this plugin,
+# opens its panel and saves a screenshot. Nothing outside the temporary stage
+# is read or written except the output file.
+#
+# Usage: OMARCHY_PATH=/path/to/omarchy demo/run [output.png]
+# Needs: sway, grim, quickshell (qs), jq, socat. Optional: faketime, DEMO_FONT_DIR with
+# JetBrainsMono Nerd Font files, DEMO_THEME (default retro-82).
+
+set -euo pipefail
+
+plugin_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+fixtures="$plugin_dir/demo/fixtures"
+out=$(realpath -m "${1:-$plugin_dir/preview.png}")
+theme=${DEMO_THEME:-retro-82}
+: "${OMARCHY_PATH:?set OMARCHY_PATH to an Omarchy checkout (quattro)}"
+for cmd in sway grim quickshell qs jq; do
+  command -v "$cmd" >/dev/null || { echo "demo/run: missing $cmd" >&2; exit 1; }
+done
+[[ -d $OMARCHY_PATH/themes/$theme ]] || { echo "demo/run: unknown theme $theme" >&2; exit 1; }
+
+# Isolation instead of backup: HOME, XDG dirs, the Wayland display and the
+# shell's IPC socket all live in this mktemp stage, so no live configuration,
+# plugin install or running shell is touched and nothing needs restoring.
+stage=$(mktemp -d "${TMPDIR:-/tmp}/shader-desk-demo.XXXXXX")
+sway_pid=""
+shell_pid=""
+cleanup() {
+  [[ -n $shell_pid ]] && kill "$shell_pid" 2>/dev/null || true
+  [[ -n $sway_pid ]] && kill "$sway_pid" 2>/dev/null || true
+  wait 2>/dev/null || true
+  # The only recursive delete: the mktemp stage created above.
+  [[ $stage == */shader-desk-demo.* && -d $stage ]] && rm -rf -- "$stage"
+}
+trap cleanup EXIT INT TERM
+
+home="$stage/home"
+export HOME="$home"
+export XDG_RUNTIME_DIR="$stage/run"
+export XDG_CONFIG_HOME="$home/.config"
+export XDG_STATE_HOME="$home/.local/state"
+export XDG_DATA_HOME="$home/.local/share"
+export XDG_CACHE_HOME="$home/.cache"
+mkdir -p "$XDG_RUNTIME_DIR" && chmod 700 "$XDG_RUNTIME_DIR"
+unset WAYLAND_DISPLAY DISPLAY HYPRLAND_INSTANCE_SIGNATURE
+
+# Fixtures: shaders, saved choices, theme state, the plugin itself.
+mkdir -p "$home/.config/hypr/shaders" "$home/.config/shader-desk" \
+  "$home/.config/omarchy/plugins" "$home/.local/state/omarchy/current" \
+  "$home/.local/bin" "$home/.local/share/fonts" "$stage/bin"
+cp "$fixtures"/shaders/*.glsl "$home/.config/hypr/shaders/"
+sed "s|@HOME@|$home|g" "$fixtures/theme-shaders.conf" > "$home/.config/shader-desk/theme-shaders.conf"
+cp "$fixtures/bin/shader-desk" "$home/.local/bin/shader-desk"
+cp "$fixtures/bin/omarchy-theme-list" "$stage/bin/omarchy-theme-list"
+printf '%s\n' "$theme" > "$home/.local/state/omarchy/current/theme.name"
+# Present as a shell restart inside a running session, so the login cover
+# that hides the desktop during the boot intro is not mapped.
+export OMARCHY_SESSION_ID=shader-desk-demo
+printf '%s\n' "$OMARCHY_SESSION_ID" > "$home/.local/state/omarchy/background-intro.session-id"
+ln -s "$OMARCHY_PATH/themes/$theme" "$home/.local/state/omarchy/current/theme"
+background=$(find "$OMARCHY_PATH/themes/$theme/backgrounds" -maxdepth 1 -type f | sort | head -n 1)
+[[ -n $background ]] && ln -s "$background" "$home/.local/state/omarchy/current/background"
+plugin_copy="$home/.config/omarchy/plugins/emrgim.shader-desk"
+mkdir -p "$plugin_copy"
+cp "$plugin_dir"/manifest.json "$plugin_dir"/*.qml "$plugin_dir"/*.js "$plugin_dir"/*.sh "$plugin_copy/"
+# Bar layout: Omarchy's default with the plugin first on the right; the
+# network and audio widgets are left out because the headless session has
+# neither service.
+cp "$fixtures/shell.json" "$home/.config/omarchy/shell.json"
+mkdir -p "$home/.config/fontconfig"
+cp "$fixtures/fonts.conf" "$home/.config/fontconfig/fonts.conf"
+if [[ -n ${DEMO_FONT_DIR:-} ]]; then
+  cp "$DEMO_FONT_DIR"/*.ttf "$home/.local/share/fonts/" 2>/dev/null || true
+  fc-cache -f "$home/.local/share/fonts" >/dev/null 2>&1 || true
+fi
+export PATH="$stage/bin:$OMARCHY_PATH/bin:$PATH"
+
+# Headless compositor: 2560x1600 at scale 2, no sway bar.
+cat > "$stage/sway.conf" <<CONF
+output HEADLESS-1 resolution 2560x1600 scale 2 background #000000 solid_color
+default_border none
+CONF
+WLR_BACKENDS=headless WLR_RENDERER=pixman WLR_LIBINPUT_NO_DEVICES=1 \
+  sway -c "$stage/sway.conf" >"$stage/sway.log" 2>&1 &
+sway_pid=$!
+for _ in $(seq 100); do
+  sock=$(find "$XDG_RUNTIME_DIR" -maxdepth 1 -name 'wayland-*' ! -name '*.lock' -print -quit)
+  [[ -n $sock ]] && break
+  sleep 0.1
+done
+[[ -n ${sock:-} ]] || { cat "$stage/sway.log" >&2; exit 1; }
+export WAYLAND_DISPLAY=$(basename "$sock")
+
+# Fixed wall clock (monotonic time left alone so timers run) when faketime
+# is available, so the bar clock reads the same on every capture.
+clock=()
+if command -v faketime >/dev/null; then
+  clock=(env FAKETIME_DONT_FAKE_MONOTONIC=1 faketime "${DEMO_TIME:-2026-10-14 20:30:00}")
+fi
+"${clock[@]}" quickshell -n -p "$OMARCHY_PATH/shell" --no-color >"$stage/shell.log" 2>&1 &
+shell_pid=$!
+ready=""
+for _ in $(seq 150); do
+  if omarchy-shell shell ping >/dev/null 2>&1; then ready=1; break; fi
+  sleep 0.2
+done
+[[ -n $ready ]] || { cat "$stage/shell.log" >&2; exit 1; }
+
+omarchy-shell shell rescanPlugins >/dev/null 2>&1 || true
+for _ in $(seq 50); do
+  result=$(omarchy-shell shell enablePlugin emrgim.shader-desk '{"section":"right","index":0}' 2>"$stage/ipc.err" || true)
+  [[ $result == ok ]] && break
+  sleep 0.2
+done
+[[ $result == ok ]] || { echo "demo/run: enablePlugin returned '$result': $(cat "$stage/ipc.err")" >&2; exit 1; }
+
+sleep 1
+omarchy-shell shell summon emrgim.shader-desk '{}' >/dev/null
+sleep "${DEMO_SETTLE:-2}"
+# Crop to the bar from the clock rightwards and the open panel: 1680x1050
+# physical pixels (16:10) from the top-right of the 2560x1600 output.
+grim "$stage/full.png"
+magick "$stage/full.png" -crop "${DEMO_CROP:-1680x1050+880+0}" +repage "$out"
+if [[ -n ${DEMO_KEEP_FULL:-} ]]; then cp "$stage/full.png" "$DEMO_KEEP_FULL"; fi
+if [[ -n ${DEMO_KEEP_LOG:-} ]]; then cp "$stage/shell.log" "$DEMO_KEEP_LOG"; cp "$home/.config/omarchy/shell.json" "$DEMO_KEEP_LOG.shell.json" 2>/dev/null || true; fi
+echo "$out"

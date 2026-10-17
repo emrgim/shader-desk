@@ -65,3 +65,11 @@ install -Dm644 data/shader-desk.desktop ~/.local/share/applications/shader-desk.
 ## License
 
 MIT. See [LICENSE](LICENSE).
+
+## Preview
+
+`preview.png` is captured by `demo/run`: the real Omarchy shell (Quickshell) in a headless sway session, with a throwaway HOME of fictional fixtures from `demo/fixtures` (three themes, three placeholder shaders, saved choices, retro-82 as the current theme). The script enables the plugin, opens its panel and saves a 1680x1050 crop. It never touches your own configuration or running shell.
+
+```sh
+OMARCHY_PATH=/path/to/omarchy DEMO_FONT_DIR=/path/to/JetBrainsMonoNerdFont demo/run preview.png
+```
