@@ -40,8 +40,23 @@ fn current() -> String {
     let v = out.lines().find_map(|l| l.strip_prefix("str:")).map(|s| s.trim().to_string()).unwrap_or_default();
     if v == "[[EMPTY]]" { String::new() } else { v }
 }
+/// Quote `s` as a Lua string literal. Only `[A-Za-z0-9/._-]` stay as they are;
+/// every other byte becomes a `\ddd` decimal escape, so a shader filename can
+/// never close the string or add Lua statements to the `hyprctl eval` code.
+fn lua_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'/' | b'.' | b'_' | b'-') { out.push(b as char); } else { out += &format!("\\{b:03}"); }
+    }
+    out.push('"');
+    out
+}
+fn shader_eval_code(path: &str) -> String {
+    format!("hl.config({{ decoration = {{ screen_shader = {} }} }})", lua_string(path))
+}
 fn eval_shader(path: &str) {
-    let _ = Command::new("hyprctl").args(["eval", &format!("hl.config({{ decoration = {{ screen_shader = \"{path}\" }} }})")]).output();
+    let _ = Command::new("hyprctl").args(["eval", &shader_eval_code(path)]).output();
 }
 /// One eval per pick. Off sets the sticky manual-off flag; any shader clears it.
 fn apply(path: &str) -> String {
@@ -422,5 +437,33 @@ fn main() {
         }
         Some("--editor") => gui(true),
         _ => gui(false),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plain_paths_stay_readable() {
+        assert_eq!(shader_eval_code("/home/u/.config/hypr/shaders/crt-2.glsl"),
+            "hl.config({ decoration = { screen_shader = \"/home/u/.config/hypr/shaders/crt-2.glsl\" } })");
+        assert_eq!(shader_eval_code(""), "hl.config({ decoration = { screen_shader = \"\" } })");
+    }
+
+    #[test]
+    fn quotes_and_lua_cannot_escape_the_string() {
+        let evil = "/s/x\" }) os.execute(\"touch /tmp/pwn\") --.glsl";
+        let lit = lua_string(evil);
+        let inner = &lit[1..lit.len() - 1];
+        assert!(lit.starts_with('"') && lit.ends_with('"'));
+        assert!(!inner.contains('"') && !inner.contains(' ') && !inner.contains('(') && !inner.contains('\n'));
+        assert!(inner.contains("\\034"));
+        assert_eq!(lua_string("a b\\'\n"), "\"a\\032b\\092\\039\\010\"");
+    }
+
+    #[test]
+    fn non_ascii_bytes_are_escaped() {
+        assert_eq!(lua_string("é"), "\"\\195\\169\"");
     }
 }
