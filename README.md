@@ -1,5 +1,7 @@
 # Shader Desk
 
+Version 1.0.1.
+
 Shader Desk is a native desktop app for [Omarchy](https://omarchy.org) that matches a Hyprland screen shader (CRT, phosphor and more) to each Omarchy theme. Pick a shader once per theme, and every time the theme changes, the right shader is applied automatically.
 
 The same matching is available as the Omarchy bar plugin `emrgim.shader-desk`.
@@ -8,7 +10,9 @@ The same matching is available as the Omarchy bar plugin `emrgim.shader-desk`.
 
 Click **Shader** on the bar, choose a theme, then choose a `.glsl` file from `~/.config/hypr/shaders`. **Off** clears that theme. The choice is saved only when you pick one.
 
-Saved lines go to `~/.config/shader-desk/theme-shaders.conf` as `theme=path` (an empty path is Off). The first save also installs `~/.config/omarchy/hooks/theme-set.d/emrgim-shader-desk.sh`. On the next theme change that hook runs `hyprctl keyword decoration:screen_shader` for the theme's shader. The current theme is applied immediately. **Open Shader Desk** launches `~/.local/bin/shader-desk` when that binary is installed.
+Saved lines go to `~/.config/shader-desk/theme-shaders.conf` as `theme=path` (an empty path is Off). The first save also installs `~/.config/omarchy/hooks/theme-set.d/emrgim-shader-desk.sh`. On the next theme change that hook applies the theme's shader. The current theme is applied immediately. **Open Shader Desk** launches `~/.local/bin/shader-desk` when that binary is installed.
+
+Only a direct `.glsl` file under `~/.config/hypr/shaders` (or a Shader Desk preview under `~/.cache/shader-desk`) is applied, and the filename has to match `[A-Za-z0-9._-]+.glsl`. Anything else is ignored. On a legacy Hyprland config the path is passed as an argument to `hyprctl keyword decoration:screen_shader`. Omarchy Quattro's Lua config rejects `keyword`, so the same checked path is sent with `hyprctl eval` as a Lua long-bracket literal. It is not pasted into a shell command.
 
 ### Install
 
@@ -61,6 +65,16 @@ cargo build --release
 install -Dm755 target/release/shader-desk ~/.local/bin/shader-desk
 install -Dm644 data/shader-desk.desktop ~/.local/share/applications/shader-desk.desktop
 ```
+
+## Changelog
+
+### 1.0.1
+
+Shader paths are no longer interpolated into `hyprctl eval`. A path is applied only when it canonicalizes to a file directly inside the shader directories and its filename matches `[A-Za-z0-9._-]+.glsl`. Legacy compositors receive `hyprctl keyword decoration:screen_shader <path>` as separate arguments. Omarchy Quattro (Lua config) receives `hyprctl eval` with that validated path encoded as a Lua long-bracket literal. Imported filenames outside the charset are not listed and not applied. The plugin manifest and the `shader-desk` crate are both 1.0.1.
+
+### 1.0.0
+
+First marketplace listing of the `emrgim.shader-desk` bar plugin.
 
 ## License
 

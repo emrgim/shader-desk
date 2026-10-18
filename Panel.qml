@@ -82,8 +82,20 @@ Panel {
     return value
   }
 
+  function knownShader(path) {
+    if (!path) return true
+    var list = root.shaders || []
+    for (var i = 0; i < list.length; i++)
+      if (list[i] === path) return true
+    return false
+  }
+
   function choose(theme, path) {
-    if (!theme) return
+    if (!theme || !Model.isSafeTheme(theme)) return
+    if (!Model.isSafeShaderPath(path) || !knownShader(path)) {
+      root.status = "That shader name is not allowed"
+      return
+    }
     var next = {}
     var key
     for (key in root.conf)
@@ -132,7 +144,7 @@ Panel {
       installHookProc.running = false
       installHookProc.running = true
       if (root.pendingApply) {
-        applyProc.shaderPath = root.pendingPath
+        applyProc.command = ["bash", Model.localPath(Qt.resolvedUrl("emrgim-shader-desk-theme-set.sh")), "--apply", root.pendingPath]
         applyProc.running = false
         applyProc.running = true
       } else {
@@ -147,10 +159,8 @@ Panel {
 
   Process {
     id: applyProc
-    property string shaderPath: ""
-    command: ["hyprctl", "keyword", "decoration:screen_shader", shaderPath]
     onExited: function(code) {
-      root.status = code === 0 ? "Applied to the current theme" : "Saved, but hyprctl did not apply it"
+      root.status = code === 0 ? "Applied to the current theme" : "Saved, but the shader path was not applied"
       root.refresh()
     }
   }

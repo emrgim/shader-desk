@@ -24,12 +24,19 @@ slug() {
   printf '%s' "$s"
 }
 
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+checker="$script_dir/emrgim-shader-desk-theme-set.sh"
+
 shaders=()
-if [[ -d $shaders_dir ]]; then
-  while IFS= read -r file; do
-    [[ -f $file ]] || continue
-    shaders+=("$file")
-  done < <(find "$shaders_dir" -maxdepth 1 -type f -name '*.glsl' | sort)
+if [[ -d $shaders_dir && -f $checker ]]; then
+  while IFS= read -r -d '' file; do
+    report=$("$checker" --check "$file" 2>/dev/null || true)
+    [[ $report == status\ ok* ]] || continue
+    canon=${report#*$'\n'path }
+    canon=${canon%%$'\n'*}
+    [[ -n $canon ]] || continue
+    shaders+=("$canon")
+  done < <(find "$shaders_dir" -maxdepth 1 -type f -name '*.glsl' -print0 | sort -z)
 fi
 
 declare -A seen=()
@@ -37,7 +44,7 @@ themes=()
 add_theme() {
   local name
   name=$(slug "$1")
-  [[ -n $name ]] || return 0
+  [[ $name =~ ^[a-z0-9][a-z0-9._-]*$ ]] || return 0
   [[ -z ${seen[$name]:-} ]] || return 0
   seen[$name]=1
   themes+=("$name")
