@@ -1,12 +1,26 @@
-//! Shader Desk: pick, create and edit Hyprland screen shaders (Lua config, via `hyprctl eval`).
+//! Shader Desk: pick, create and edit Hyprland screen shaders.
 //! `shader-desk` (GUI) | `--editor` | `hook <theme>` | `apply <path|off>` | `current` | `gen-presets`
+//!
+//! Screen-shader paths are argv to `hyprctl`, never a shell string. Legacy
+//! configs use `keyword decoration:screen_shader`. Omarchy Quattro's Lua
+//! config rejects keyword, so that case uses `eval` only with a canonical
+//! path from an allowed directory, encoded as a Lua literal (`shader_path`).
 use adw::prelude::*;
 use gtk::{gdk, glib};
 use serde_json::{json, Value};
-use std::{cell::RefCell, collections::BTreeMap, fs, path::Path, process::Command, rc::Rc, time::Duration};
+use std::{cell::RefCell, collections::BTreeMap, fs, path::{Path, PathBuf}, process::Command, rc::Rc, sync::OnceLock, time::Duration};
+
+mod shader_path;
 
 fn home() -> String { std::env::var("HOME").unwrap_or_else(|_| "/home/emiliano".into()) }
 fn sd() -> String { format!("{}/.config/hypr/shaders", home()) }
+fn shader_dir() -> PathBuf {
+    let raw = PathBuf::from(sd());
+    fs::canonicalize(&raw).unwrap_or(raw)
+}
+fn roots() -> Vec<PathBuf> {
+    vec![shader_dir(), PathBuf::from(format!("{}/.cache/shader-desk", home()))]
+}
 fn conf_path() -> String { format!("{}/.config/shader-desk/theme-shaders.conf", home()) }
 fn flag_path() -> String { format!("{}/.config/shader-desk/manual-off", home()) }
 const DEFAULT: &str = "__default__";
@@ -22,14 +36,15 @@ fn defaults() -> Value {
 fn preset(over: Value) -> Value { let mut d = defaults(); for (k, v) in over.as_object().unwrap() { d[k] = v.clone(); } d }
 /// Built-in presets: (file, name, params used when Edit makes a copy). Protected from Delete.
 fn builtins() -> Vec<(String, &'static str, Value)> {
-    let d = sd();
+    let d = shader_dir();
+    let p = |n: &str| d.join(n).to_string_lossy().into_owned();
     vec![
-        (format!("{d}/phosphor-orange.glsl"), "Phosphor Orange", preset(json!({"phosphor":"orange","curvature":false,"grille":false,"bloom_amt":0.05}))),
-        (format!("{d}/phosphor.glsl"), "Phosphor Green", preset(json!({"phosphor":"green","curvature":false,"grille":false,"bloom_amt":0.05}))),
-        (format!("{d}/ntsc.glsl"), "NTSC", preset(json!({"name":"NTSC","filter":"NTSC","curv":0.02,"scan_strength":0.25,"grille":false,"bloom_amt":0.08,"vig":0.2,"noise":0.06}))),
-        (format!("{d}/game-boy.glsl"), "Game Boy", preset(json!({"name":"Game Boy","filter":"Game Boy","curvature":false,"scanlines":false,"grille_strength":0.25,"scan_spacing":3.0,"bloom":false,"vig":0.1}))),
-        (format!("{d}/aperture-grille.glsl"), "Aperture Grille", preset(json!({"scan_strength":0.55,"scan_spacing":2.0,"curv":0.035,"grille_strength":0.10,"bloom_amt":0.06}))),
-        (format!("{d}/lcd.glsl"), "LCD", preset(json!({"name":"LCD","filter":"LCD","curvature":false,"scanlines":false,"grille":false,"vignette":false,"bloom_amt":0.03}))),
+        (p("phosphor-orange.glsl"), "Phosphor Orange", preset(json!({"phosphor":"orange","curvature":false,"grille":false,"bloom_amt":0.05}))),
+        (p("phosphor.glsl"), "Phosphor Green", preset(json!({"phosphor":"green","curvature":false,"grille":false,"bloom_amt":0.05}))),
+        (p("ntsc.glsl"), "NTSC", preset(json!({"name":"NTSC","filter":"NTSC","curv":0.02,"scan_strength":0.25,"grille":false,"bloom_amt":0.08,"vig":0.2,"noise":0.06}))),
+        (p("game-boy.glsl"), "Game Boy", preset(json!({"name":"Game Boy","filter":"Game Boy","curvature":false,"scanlines":false,"grille_strength":0.25,"scan_spacing":3.0,"bloom":false,"vig":0.1}))),
+        (p("aperture-grille.glsl"), "Aperture Grille", preset(json!({"scan_strength":0.55,"scan_spacing":2.0,"curv":0.035,"grille_strength":0.10,"bloom_amt":0.06}))),
+        (p("lcd.glsl"), "LCD", preset(json!({"name":"LCD","filter":"LCD","curvature":false,"scanlines":false,"grille":false,"vignette":false,"bloom_amt":0.03}))),
     ]
 }
 fn is_builtin(p: &str) -> bool { builtins().iter().any(|b| b.0 == p) }
@@ -40,30 +55,41 @@ fn current() -> String {
     let v = out.lines().find_map(|l| l.strip_prefix("str:")).map(|s| s.trim().to_string()).unwrap_or_default();
     if v == "[[EMPTY]]" { String::new() } else { v }
 }
-/// Quote `s` as a Lua string literal. Only `[A-Za-z0-9/._-]` stay as they are;
-/// every other byte becomes a `\ddd` decimal escape, so a shader filename can
-/// never close the string or add Lua statements to the `hyprctl eval` code.
-fn lua_string(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('"');
-    for b in s.bytes() {
-        if b.is_ascii_alphanumeric() || matches!(b, b'/' | b'.' | b'_' | b'-') { out.push(b as char); } else { out += &format!("\\{b:03}"); }
-    }
-    out.push('"');
-    out
+fn hypr_mode() -> shader_path::HyprConfigMode {
+    static MODE: OnceLock<shader_path::HyprConfigMode> = OnceLock::new();
+    *MODE.get_or_init(|| {
+        if let Ok(forced) = std::env::var("SHADER_DESK_HYPR_MODE") {
+            return match forced.as_str() {
+                "lua" | "eval" => shader_path::HyprConfigMode::Lua,
+                _ => shader_path::HyprConfigMode::Legacy,
+            };
+        }
+        // No value: Hyprland returns before parseKeyword, so the probe does not change the shader.
+        let out = Command::new("hyprctl").args(["keyword", "decoration:screen_shader"]).output();
+        let Ok(out) = out else { return shader_path::HyprConfigMode::Legacy };
+        let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        shader_path::mode_from_probe(&text)
+    })
 }
-fn shader_eval_code(path: &str) -> String {
-    format!("hl.config({{ decoration = {{ screen_shader = {} }} }})", lua_string(path))
-}
-fn eval_shader(path: &str) {
-    let _ = Command::new("hyprctl").args(["eval", &shader_eval_code(path)]).output();
-}
-/// One eval per pick. Off sets the sticky manual-off flag; any shader clears it.
-fn apply(path: &str) -> String {
+/// Off sets the sticky manual-off flag; any accepted shader clears it.
+/// Refused paths are not sent to hyprctl and do not change the flag.
+fn try_apply(path: &str) -> Result<String, String> {
+    let args = shader_path::screen_shader_argv(path, &roots(), hypr_mode()).map_err(|e| e.to_string())?;
     let _ = fs::create_dir_all(format!("{}/.config/shader-desk", home()));
     if path.is_empty() { let _ = fs::write(flag_path(), ""); } else { let _ = fs::remove_file(flag_path()); }
-    eval_shader(path);
-    current()
+    // argv only. `hyprctl` is not reached through a shell.
+    let out = Command::new("hyprctl").args(&args).output().map_err(|e| e.to_string())?;
+    if !out.status.success() {
+        return Err(format!("hyprctl exited {}", out.status));
+    }
+    let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    if text.contains("non-legacy") || text.contains("Use eval") {
+        return Err("hyprctl keyword was rejected by the Lua config".into());
+    }
+    Ok(current())
+}
+fn apply(path: &str) -> String {
+    try_apply(path).unwrap_or_else(|e| { eprintln!("shader-desk: {e}"); current() })
 }
 
 // ---------- conf ----------
@@ -80,23 +106,31 @@ fn load_conf() -> BTreeMap<String, String> {
 fn save_conf(m: &BTreeMap<String, String>) {
     let _ = fs::create_dir_all(format!("{}/.config/shader-desk", home()));
     let mut s = String::from("# Shader Desk: theme=shader path (empty = Off). No line = theme default.\n");
-    for (k, v) in m { s += &format!("{k}={v}\n"); }
+    for (k, v) in m {
+        let Some(k) = shader_path::safe_theme_key(k) else { continue };
+        if !v.is_empty() && shader_path::validate_shader_path(v, &roots()).is_err() { continue; }
+        s += &format!("{k}={v}\n");
+    }
     let _ = fs::write(conf_path(), s);
 }
-fn slug(s: &str) -> String { s.trim().to_lowercase().replace(' ', "-") }
 fn slugify(s: &str) -> String { regex::Regex::new("[^a-z0-9]+").unwrap().replace_all(&s.to_lowercase(), "-").trim_matches('-').to_string() }
 
 /// Theme-set hook: manual-off wins, then theme-shaders.conf, then the theme's own shader, else Off.
+/// Theme keys and shader paths that fail the safe-path gate clear the shader instead of being applied.
 fn hook(theme: &str) {
-    let theme = slug(theme);
-    if Path::new(&flag_path()).exists() { eval_shader(""); return; }
-    if !theme.is_empty() {
-        if let Some(v) = load_conf().get(&theme) {
-            if v.is_empty() || Path::new(v).exists() { eval_shader(v); return; }
-        }
+    if Path::new(&flag_path()).exists() { apply(""); return; }
+    let Some(theme) = shader_path::safe_theme_key(theme) else { apply(""); return; };
+    let conf = load_conf();
+    if let Some(v) = conf.get(&theme).cloned() {
+        if v.is_empty() { apply(""); return; }
+        if shader_path::validate_shader_path(&v, &roots()).is_ok() { apply(&v); return; }
+        eprintln!("shader-desk: ignored unsafe shader path");
+        apply("");
+        return;
     }
-    let f = if theme == "phosphor-green" { format!("{}/phosphor.glsl", sd()) } else { format!("{}/{theme}.glsl", sd()) };
-    if !theme.is_empty() && Path::new(&f).exists() { eval_shader(&f) } else { eval_shader("") }
+    let f = if theme == "phosphor-green" { shader_dir().join("phosphor.glsl") } else { shader_dir().join(format!("{theme}.glsl")) };
+    let f = f.to_string_lossy().into_owned();
+    if shader_path::validate_shader_path(&f, &roots()).is_ok() { apply(&f); } else { apply(""); }
 }
 
 // ---------- shaders ----------
@@ -112,11 +146,14 @@ fn friendly(path: &str) -> String {
     Path::new(path).file_stem().map(|s| s.to_string_lossy().replace('-', " ")).unwrap_or_default()
 }
 fn user_shaders() -> Vec<String> {
-    let mut v: Vec<String> = fs::read_dir(sd()).map(|r| r.filter_map(|e| e.ok()).map(|e| e.path().to_string_lossy().to_string())
-        .filter(|p| p.ends_with(".glsl") && !is_builtin(p)).collect()).unwrap_or_default();
-    v.sort(); v
+    shader_path::list_imported_shaders(&shader_dir()).into_iter()
+        .map(|p| p.to_string_lossy().into_owned())
+        .filter(|p| !is_builtin(p))
+        .collect()
 }
-fn presets_present() -> Vec<String> { builtins().into_iter().map(|b| b.0).filter(|p| Path::new(p).exists()).collect() }
+fn presets_present() -> Vec<String> {
+    builtins().into_iter().map(|b| b.0).filter(|p| shader_path::validate_shader_path(p, &roots()).is_ok()).collect()
+}
 fn fnum(v: &Value, k: &str) -> f64 { v[k].as_f64().unwrap_or(0.0) }
 fn fb(v: &Value, k: &str) -> bool { v[k].as_bool().unwrap_or(false) }
 fn generate(p: &Value) -> String {
@@ -207,10 +244,13 @@ fn compile_ok(src: &str) -> Result<(), String> {
 }
 fn themes() -> Vec<String> {
     let mut s = std::collections::BTreeSet::new();
+    let add = |s: &mut std::collections::BTreeSet<String>, name: &str| {
+        if let Some(t) = shader_path::safe_theme_key(name) { s.insert(t); }
+    };
     for d in [format!("{}/.config/omarchy/themes", home()), format!("{}/.local/share/omarchy/themes", home()), "/usr/share/omarchy/themes".into()] {
-        if let Ok(r) = fs::read_dir(d) { for e in r.flatten() { if e.path().is_dir() { s.insert(slug(&e.file_name().to_string_lossy())); } } }
+        if let Ok(r) = fs::read_dir(d) { for e in r.flatten() { if e.path().is_dir() { add(&mut s, &e.file_name().to_string_lossy()); } } }
     }
-    if let Ok(o) = Command::new("omarchy-theme-list").output() { for l in String::from_utf8_lossy(&o.stdout).lines() { if !l.trim().is_empty() { s.insert(slug(l)); } } }
+    if let Ok(o) = Command::new("omarchy-theme-list").output() { for l in String::from_utf8_lossy(&o.stdout).lines() { if !l.trim().is_empty() { add(&mut s, l); } } }
     s.into_iter().collect()
 }
 
@@ -372,7 +412,7 @@ impl App {
             if let Err(e) = compile_ok(&src) { m.set_text(&format!("Compile error:\n{}", e.chars().take(400).collect::<String>())); return; }
             let dir = format!("{}/.cache/shader-desk", home()); let _ = fs::create_dir_all(&dir);
             let a = format!("{dir}/preview.glsl"); let b = format!("{dir}/preview-b.glsl");
-            let path = if current() == a { b } else { a }; // alternate names so one eval loads the new source
+            let path = if current() == a { b } else { a }; // alternate names so Hyprland reloads the new source
             let _ = fs::write(&path, src); let cur = apply(&path); me.refresh(Some(cur));
             m.set_text("Previewing (not saved).");
         });
@@ -380,6 +420,8 @@ impl App {
         sv.connect_clicked(move |_| {
             let p = c(); let n = p["name"].as_str().unwrap_or("").to_string();
             if n.is_empty() { m.set_text("Give it a name first."); return; }
+            let safe_name = format!("{}.glsl", slugify(&n));
+            if shader_path::accept_shader_import(&safe_name).is_err() { m.set_text("Name must contain letters or numbers."); return; }
             let src = generate(&p);
             if let Err(e) = compile_ok(&src) { m.set_text(&format!("Compile error, not saved:\n{}", e.chars().take(400).collect::<String>())); return; }
             let path = target.clone().unwrap_or_else(|| {
@@ -390,7 +432,7 @@ impl App {
             });
             if fs::write(&path, &src).is_err() { m.set_text("Could not write the file."); return; }
             m.set_text(&format!("Saved {} (compiles cleanly).", fname(&path)));
-            if me.st.borrow().active == path { eval_shader(&path); }
+            if me.st.borrow().active == path { apply(&path); }
             me.rebuild();
         });
         w.present();
@@ -426,7 +468,13 @@ fn main() {
     let a: Vec<String> = std::env::args().collect();
     match a.get(1).map(String::as_str) {
         Some("hook") => hook(&a.get(2).cloned().unwrap_or_else(|| fs::read_to_string(format!("{}/.local/state/omarchy/current/theme.name", home())).unwrap_or_default())),
-        Some("apply") => { let p = a.get(2).map(String::as_str).unwrap_or("off"); println!("{}", apply(if p == "off" { "" } else { p })); }
+        Some("apply") => {
+            let p = a.get(2).map(String::as_str).unwrap_or("off");
+            match try_apply(if p == "off" { "" } else { p }) {
+                Ok(c) => println!("{c}"),
+                Err(e) => { eprintln!("shader-desk: {e}"); std::process::exit(1); }
+            }
+        }
         Some("current") => println!("{}", current()),
         Some("gen-presets") => {
             for (path, _, prm) in builtins() {
@@ -440,30 +488,3 @@ fn main() {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn plain_paths_stay_readable() {
-        assert_eq!(shader_eval_code("/home/u/.config/hypr/shaders/crt-2.glsl"),
-            "hl.config({ decoration = { screen_shader = \"/home/u/.config/hypr/shaders/crt-2.glsl\" } })");
-        assert_eq!(shader_eval_code(""), "hl.config({ decoration = { screen_shader = \"\" } })");
-    }
-
-    #[test]
-    fn quotes_and_lua_cannot_escape_the_string() {
-        let evil = "/s/x\" }) os.execute(\"touch /tmp/pwn\") --.glsl";
-        let lit = lua_string(evil);
-        let inner = &lit[1..lit.len() - 1];
-        assert!(lit.starts_with('"') && lit.ends_with('"'));
-        assert!(!inner.contains('"') && !inner.contains(' ') && !inner.contains('(') && !inner.contains('\n'));
-        assert!(inner.contains("\\034"));
-        assert_eq!(lua_string("a b\\'\n"), "\"a\\032b\\092\\039\\010\"");
-    }
-
-    #[test]
-    fn non_ascii_bytes_are_escaped() {
-        assert_eq!(lua_string("é"), "\"\\195\\169\"");
-    }
-}
