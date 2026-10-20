@@ -1,6 +1,6 @@
 # Shader Desk
 
-Version 1.0.1.
+Version 1.0.2.
 
 Shader Desk is a native desktop app for [Omarchy](https://omarchy.org) that matches a Hyprland screen shader (CRT, phosphor and more) to each Omarchy theme. Pick a shader once per theme, and every time the theme changes, the right shader is applied automatically.
 
@@ -67,6 +67,10 @@ install -Dm644 data/shader-desk.desktop ~/.local/share/applications/shader-desk.
 ```
 
 ## Changelog
+
+### 1.0.2
+
+A shader file's `// shader-desk:` comment is ignored when it is not a JSON object, is malformed, or has fields of an unexpected type. Edit falls back to the built-in defaults instead of panicking. Valid presets are unchanged. The plugin manifest and the `shader-desk` crate are both 1.0.2.
 
 ### 1.0.1
 
