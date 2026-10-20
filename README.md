@@ -1,6 +1,6 @@
 # Shader Desk
 
-Version 1.0.2.
+Version 1.0.3.
 
 Shader Desk is a native desktop app for [Omarchy](https://omarchy.org) that matches a Hyprland screen shader (CRT, phosphor and more) to each Omarchy theme. Pick a shader once per theme, and every time the theme changes, the right shader is applied automatically.
 
@@ -67,6 +67,10 @@ install -Dm644 data/shader-desk.desktop ~/.local/share/applications/shader-desk.
 ```
 
 ## Changelog
+
+### 1.0.3
+
+The native compile check no longer writes `shader-desk-check-<pid>.frag` in the shared temp directory. Preview and Save run `glslangValidator` on an exclusively created `.frag` file in a per-user directory (`$XDG_RUNTIME_DIR/shader-desk`, or `~/.cache/shader-desk/compile-check` when that runtime directory is missing or not private). The file is removed when the check finishes. If it cannot be created, Preview and Save show the error. Valid and invalid shaders are still accepted and rejected as before. The plugin manifest and the `shader-desk` crate are both 1.0.3.
 
 ### 1.0.2
 

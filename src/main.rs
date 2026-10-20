@@ -10,6 +10,7 @@ use gtk::{gdk, glib};
 use serde_json::{json, Value};
 use std::{cell::RefCell, collections::BTreeMap, fs, path::{Path, PathBuf}, process::Command, rc::Rc, sync::OnceLock, time::Duration};
 
+mod compile_check;
 mod shader_path;
 
 fn home() -> String { std::env::var("HOME").unwrap_or_else(|_| "/home/emiliano".into()) }
@@ -303,11 +304,7 @@ void main() {{
         phon = if rgb.is_some() { "1.0" } else { "0.0" }, r = f(r), g = f(g), b = f(b))
 }
 fn compile_ok(src: &str) -> Result<(), String> {
-    let t = format!("{}/shader-desk-check-{}.frag", std::env::temp_dir().display(), std::process::id());
-    fs::write(&t, src).map_err(|e| e.to_string())?;
-    let o = Command::new("glslangValidator").args(["-S", "frag", &t]).output().map_err(|e| e.to_string())?;
-    let _ = fs::remove_file(&t);
-    if o.status.success() { Ok(()) } else { Err(String::from_utf8_lossy(&o.stdout).to_string()) }
+    compile_check::compile_ok(src)
 }
 fn themes() -> Vec<String> {
     let mut s = std::collections::BTreeSet::new();
@@ -816,6 +813,15 @@ mod tests {
         assert_eq!(params["curvature"], json!(false));
         assert_eq!(params["scanlines"], defaults()["scanlines"]);
         assert_eq!(params["bloom_amt"], defaults()["bloom_amt"]);
+    }
+
+    #[test]
+    fn generated_shader_still_compiles_and_invalid_source_does_not() {
+        let src = generate(&defaults());
+        compile_check::compile_ok(&src).expect("generated preview shader");
+        let broken = format!("{src}\nthis is not valid glsl\n");
+        let err = compile_check::compile_ok(&broken).unwrap_err();
+        assert!(err.contains("ERROR"), "{err}");
     }
 }
 

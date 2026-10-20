@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "emrgim.shader-desk",
   "name": "Shader Desk",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "author": "Emiliano",
   "license": "MIT",
   "description": "Match a Hyprland screen shader to each Omarchy theme.",
