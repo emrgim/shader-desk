@@ -33,7 +33,67 @@ fn defaults() -> Value {
            "grille_type":"aperture","phosphor":"none","scan_strength":0.35,"scan_spacing":3.0,"curv":0.03,
            "bloom_amt":0.06,"vig":0.22,"grille_strength":0.10,"noise":0.05})
 }
-fn preset(over: Value) -> Value { let mut d = defaults(); for (k, v) in over.as_object().unwrap() { d[k] = v.clone(); } d }
+/// Overlay preset fields onto the defaults.
+/// A non-object, or a known field of an unexpected JSON type, is ignored so
+/// metadata from a shader file cannot panic the editor. Valid fields are kept.
+fn preset(over: Value) -> Value {
+    let mut d = defaults();
+    let Some(obj) = over.as_object() else {
+        eprintln!("shader-desk: ignored non-object shader metadata");
+        return d;
+    };
+    let mut ignored = false;
+    for (k, v) in obj {
+        match accepted_meta_field(k, v) {
+            Some(clean) => d[k] = clean,
+            None => ignored = true,
+        }
+    }
+    if ignored {
+        eprintln!("shader-desk: ignored shader metadata field with an unexpected type");
+    }
+    d
+}
+fn accepted_meta_field(key: &str, value: &Value) -> Option<Value> {
+    let ok = match key {
+        "name" | "filter" | "grille_type" | "phosphor" => value.is_string(),
+        "curvature" | "scanlines" | "grille" | "bloom" | "vignette" => value.is_boolean(),
+        "scan_strength" | "scan_spacing" | "curv" | "bloom_amt" | "vig" | "grille_strength" | "noise" => value.is_number(),
+        _ => false,
+    };
+    ok.then(|| value.clone())
+}
+struct LoadedPreset { params: Value, overwrite: bool }
+/// `// shader-desk:` metadata from a shader file. Only a JSON object is a preset.
+/// Anything else is ignored and does not replace the file on Save.
+fn load_shader_preset(src: &str) -> LoadedPreset {
+    let Some(line) = shader_meta_line(src) else {
+        return LoadedPreset { params: defaults(), overwrite: false };
+    };
+    match serde_json::from_str::<Value>(line) {
+        Ok(value) if value.is_object() => LoadedPreset { params: preset(value), overwrite: true },
+        Ok(_) => {
+            eprintln!("shader-desk: ignored non-object shader metadata");
+            LoadedPreset { params: defaults(), overwrite: false }
+        }
+        Err(_) => {
+            eprintln!("shader-desk: ignored malformed shader metadata");
+            LoadedPreset { params: defaults(), overwrite: false }
+        }
+    }
+}
+/// Params and overwrite flag used when Edit opens a user shader.
+/// `friendly_name` is the label used when the file has no usable preset.
+fn user_shader_edit(src: &str, friendly_name: &str) -> (Value, bool) {
+    let loaded = load_shader_preset(src);
+    if loaded.overwrite {
+        (loaded.params, true)
+    } else {
+        let mut params = defaults();
+        params["name"] = json!(format!("{friendly_name} custom"));
+        (params, false)
+    }
+}
 /// Built-in presets: (file, name, params used when Edit makes a copy). Protected from Delete.
 fn builtins() -> Vec<(String, &'static str, Value)> {
     let d = shader_dir();
@@ -134,10 +194,14 @@ fn hook(theme: &str) {
 }
 
 // ---------- shaders ----------
+const META_PREFIX: &str = "// shader-desk: ";
+fn shader_meta_line(src: &str) -> Option<&str> {
+    src.lines().take(5).find_map(|l| l.strip_prefix(META_PREFIX))
+}
 fn read_params(path: &str) -> Option<Value> {
     let s = fs::read_to_string(path).ok()?;
-    let line = s.lines().take(5).find_map(|l| l.strip_prefix("// shader-desk: "))?;
-    serde_json::from_str(line).ok()
+    let value: Value = serde_json::from_str(shader_meta_line(&s)?).ok()?;
+    if value.is_object() { Some(value) } else { None }
 }
 fn fname(p: &str) -> String { Path::new(p).file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default() }
 fn friendly(path: &str) -> String {
@@ -157,6 +221,9 @@ fn presets_present() -> Vec<String> {
 fn fnum(v: &Value, k: &str) -> f64 { v[k].as_f64().unwrap_or(0.0) }
 fn fb(v: &Value, k: &str) -> bool { v[k].as_bool().unwrap_or(false) }
 fn generate(p: &Value) -> String {
+    // Sanitize again so the embedded comment stays a JSON object of known types.
+    let sanitized = preset(p.clone());
+    let p = &sanitized;
     let f = |x: f64| format!("{x:.4}");
     let on = |b: &str, k: &str| if fb(p, b) { fnum(p, k) } else { 0.0 };
     let rgb = match p["phosphor"].as_str().unwrap_or("none") { "green" => Some((0.2, 1.0, 0.35)), "orange" => Some((1.0, 0.55, 0.12)), "amber" => Some((1.0, 0.75, 0.2)), "white" => Some((0.92, 0.95, 1.0)), _ => None };
@@ -356,8 +423,12 @@ impl App {
         let mut target: Option<String> = None; // only user shaders are overwritten; presets always save a copy
         if let Some(b) = &base {
             if let Some(bi) = builtins().into_iter().find(|x| x.0 == *b) { p = bi.2.clone(); p["name"] = json!(format!("{} custom", bi.1)); }
-            else if let Some(prm) = read_params(b) { p = preset(prm); target = Some(b.clone()); }
-            else { p["name"] = json!(format!("{} custom", friendly(b))); }
+            else {
+                let src = fs::read_to_string(b).unwrap_or_default();
+                let (params, overwrite) = user_shader_edit(&src, &friendly(b));
+                p = params;
+                if overwrite { target = Some(b.clone()); }
+            }
         }
         let w = adw::Window::builder().application(&self.app).title("Shader Desk · Editor").default_width(440).default_height(720).build();
         let tv = adw::ToolbarView::new(); let hb = adw::HeaderBar::new();
@@ -485,6 +556,266 @@ fn main() {
         }
         Some("--editor") => gui(true),
         _ => gui(false),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn generated_meta(src: &str) -> Value {
+        let line = src.lines().nth(1).expect("shader meta line");
+        let json_text = line.strip_prefix(META_PREFIX).expect("shader meta prefix");
+        serde_json::from_str(json_text).expect("shader meta json")
+    }
+
+    /// Previous merge for a well-typed object: copy every field onto the defaults.
+    fn legacy_merge(over: Value) -> Value {
+        let mut d = defaults();
+        for (k, v) in over.as_object().expect("legacy oracle") {
+            d[k.as_str()] = v.clone();
+        }
+        d
+    }
+
+    fn assert_no_panic<T: std::panic::UnwindSafe>(label: &str, f: impl FnOnce() -> T + std::panic::UnwindSafe) -> T {
+        match catch_unwind(f) {
+            Ok(value) => value,
+            Err(_) => panic!("{label} panicked"),
+        }
+    }
+
+    struct Scratch(PathBuf);
+    impl Scratch {
+        fn new() -> Self {
+            let n = SystemTime::now().duration_since(UNIX_EPOCH).expect("clock").as_nanos();
+            let p = std::env::temp_dir().join(format!("shader-desk-meta-{n}-{}", std::process::id()));
+            fs::create_dir_all(&p).unwrap();
+            Self(p)
+        }
+    }
+    impl Drop for Scratch {
+        fn drop(&mut self) { let _ = fs::remove_dir_all(&self.0); }
+    }
+
+    #[test]
+    fn non_object_metadata_falls_back_to_defaults() {
+        let cases = [
+            ("array", "[]"),
+            ("nested array", "[1, {\"a\": 1}]"),
+            ("null", "null"),
+            ("true", "true"),
+            ("false", "false"),
+            ("zero", "0"),
+            ("int", "1"),
+            ("negative", "-3"),
+            ("float", "1.5"),
+            ("string", "\"nope\""),
+            ("whitespace array", "  []"),
+        ];
+        for (label, body) in cases {
+            let src = format!("// shader-desk: {body}\nvoid main() {{}}\n");
+            let parsed: Value = serde_json::from_str(body).unwrap();
+            let outcome = catch_unwind(AssertUnwindSafe(|| {
+                let direct = preset(parsed);
+                let (params, overwrite) = user_shader_edit(&src, "evil");
+                let generated = generate(&params);
+                (direct, params, overwrite, generated)
+            }));
+            let (direct, params, overwrite, generated) = outcome.unwrap_or_else(|_| panic!("{label} panicked"));
+            assert_eq!(direct, defaults(), "{label}");
+            assert!(!overwrite, "{label}");
+            let mut expect = defaults();
+            expect["name"] = json!("evil custom");
+            assert_eq!(params, expect, "{label}");
+            assert_eq!(generated_meta(&generated), expect, "{label}");
+            assert!(!generated.contains("// shader-desk: []"), "{label}");
+        }
+    }
+
+    #[test]
+    fn malformed_metadata_falls_back_to_defaults() {
+        let bodies = ["", "{", "{]", "not-json", "{\"a\":}", "{\"name\":\"ok\"} trailing", "[] []"];
+        for body in bodies {
+            let src = format!("#version 300 es\n// shader-desk: {body}\n");
+            let (params, overwrite) = assert_no_panic(body, || user_shader_edit(&src, "broken"));
+            assert!(!overwrite, "{body}");
+            assert_eq!(params["name"], json!("broken custom"), "{body}");
+            assert_eq!(params["filter"], defaults()["filter"], "{body}");
+            assert_eq!(params["curvature"], defaults()["curvature"], "{body}");
+            assert!(generated_meta(&generate(&params)).is_object(), "{body}");
+        }
+    }
+
+    #[test]
+    fn unexpected_field_types_keep_defaults_and_valid_fields() {
+        let input = json!({
+            "name": "Keep",
+            "filter": ["LCD"],
+            "curvature": "yes",
+            "scanlines": 1,
+            "grille": false,
+            "bloom": null,
+            "vignette": false,
+            "grille_type": {"t": "slot mask"},
+            "phosphor": "green",
+            "scan_strength": "0.9",
+            "scan_spacing": true,
+            "curv": 0.1,
+            "bloom_amt": [],
+            "vig": null,
+            "grille_strength": 0,
+            "noise": {},
+            "extra": [1, 2, 3],
+            "note": "hello"
+        });
+        let got = assert_no_panic("unexpected types", || preset(input));
+        let mut expect = defaults();
+        expect["name"] = json!("Keep");
+        expect["grille"] = json!(false);
+        expect["vignette"] = json!(false);
+        expect["phosphor"] = json!("green");
+        expect["curv"] = json!(0.1);
+        expect["grille_strength"] = json!(0);
+        assert_eq!(got, expect);
+        let src = generate(&got);
+        let meta = generated_meta(&src);
+        assert_eq!(meta, expect);
+        assert!(src.contains("const int FILTER = 0;"));
+        assert!(src.contains("const float CURV = 0.1000;"));
+        assert!(src.contains("const float SCAN = 0.3500;"));
+        assert!(src.contains("const float MASK = 0.0000;"));
+        assert!(src.contains("const float PHOS_ON = 1.0;"));
+        assert!(src.contains("const vec3 PHOS = vec3(0.2000, 1.0000, 0.3500);"));
+    }
+
+    #[test]
+    fn generate_of_non_object_embeds_defaults() {
+        for value in [json!([]), json!(null), json!("x"), json!(1), json!(true), json!(false)] {
+            let src = assert_no_panic("generate", AssertUnwindSafe(|| generate(&value)));
+            assert_eq!(generated_meta(&src), defaults());
+            assert!(src.starts_with("#version 300 es\n"));
+        }
+    }
+
+    #[test]
+    fn valid_presets_merge_and_generate_as_before() {
+        let samples = [
+            json!({"phosphor":"orange","curvature":false,"grille":false,"bloom_amt":0.05}),
+            json!({"phosphor":"green","curvature":false,"grille":false,"bloom_amt":0.05}),
+            json!({"name":"NTSC","filter":"NTSC","curv":0.02,"scan_strength":0.25,"grille":false,"bloom_amt":0.08,"vig":0.2,"noise":0.06}),
+            json!({"name":"Game Boy","filter":"Game Boy","curvature":false,"scanlines":false,"grille_strength":0.25,"scan_spacing":3.0,"bloom":false,"vig":0.1}),
+            json!({"scan_strength":0.55,"scan_spacing":2.0,"curv":0.035,"grille_strength":0.10,"bloom_amt":0.06}),
+            json!({"name":"LCD","filter":"LCD","curvature":false,"scanlines":false,"grille":false,"vignette":false,"bloom_amt":0.03}),
+            json!({"name":"","curvature":false,"scan_strength":0,"grille_strength":0}),
+        ];
+        for sample in samples {
+            let merged = preset(sample.clone());
+            assert_eq!(merged, legacy_merge(sample));
+            assert_eq!(preset(merged.clone()), merged);
+            let src = generate(&merged);
+            assert_eq!(generated_meta(&src), merged);
+            let again = user_shader_edit(&src, "ignored");
+            assert!(again.1);
+            assert_eq!(again.0, merged);
+        }
+
+        let ntsc = preset(json!({"name":"NTSC","filter":"NTSC","curv":0.02,"scan_strength":0.25,"grille":false,"bloom_amt":0.08,"vig":0.2,"noise":0.06}));
+        let src = generate(&ntsc);
+        assert!(src.contains("const int FILTER = 1;"));
+        assert!(src.contains("const float CURV = 0.0200;"));
+        assert!(src.contains("const float SCAN = 0.2500;"));
+        assert!(src.contains("const float SPACING = 3.0000;"));
+        assert!(src.contains("const float MASK = 0.0000;"));
+        assert!(src.contains("const int GRILLE = 0;"));
+        assert!(src.contains("const float BLOOM = 0.0800;"));
+        assert!(src.contains("const float VIG = 0.2000;"));
+        assert!(src.contains("const float NOISE = 0.0600;"));
+        assert!(src.contains("const float PHOS_ON = 0.0;"));
+        assert!(src.contains("const vec3 PHOS = vec3(1.0000, 1.0000, 1.0000);"));
+
+        let orange = preset(json!({"phosphor":"orange","curvature":false,"grille":false,"bloom_amt":0.05}));
+        let src = generate(&orange);
+        assert!(src.contains("const int FILTER = 0;"));
+        assert!(src.contains("const float CURV = 0.0000;"));
+        assert!(src.contains("const float BLOOM = 0.0500;"));
+        assert!(src.contains("const float PHOS_ON = 1.0;"));
+        assert!(src.contains("const vec3 PHOS = vec3(1.0000, 0.5500, 0.1200);"));
+
+        let gb = preset(json!({"name":"Game Boy","filter":"Game Boy","curvature":false,"scanlines":false,"grille_strength":0.25,"scan_spacing":3.0,"bloom":false,"vig":0.1}));
+        let src = generate(&gb);
+        assert!(src.contains("const int FILTER = 2;"));
+        assert!(src.contains("const float SCAN = 0.0000;"));
+        assert!(src.contains("const float MASK = 0.2500;"));
+        assert!(src.contains("const float BLOOM = 0.0000;"));
+        assert!(src.contains("const float VIG = 0.1000;"));
+    }
+
+    #[test]
+    fn metadata_outside_the_first_five_lines_is_not_a_preset() {
+        let late = "\n\n\n\n\n// shader-desk: []\n";
+        let (params, overwrite) = assert_no_panic("line 6", || user_shader_edit(late, "late"));
+        assert!(!overwrite);
+        assert_eq!(params["name"], json!("late custom"));
+
+        let fifth = "\n\n\n\n// shader-desk: []\n";
+        let (params, overwrite) = user_shader_edit(fifth, "fifth");
+        assert!(!overwrite);
+        assert_eq!(params["filter"], defaults()["filter"]);
+        assert_eq!(params["name"], json!("fifth custom"));
+    }
+
+    #[test]
+    fn glsl_file_with_array_metadata_is_ignored_on_edit() {
+        let dir = Scratch::new();
+        let path = dir.0.join("bad-array.glsl");
+        fs::write(&path, b"#version 300 es\n// shader-desk: []\nvoid main() {}\n").unwrap();
+        let text = path.to_str().unwrap().to_string();
+        let src = fs::read_to_string(&path).unwrap();
+        let outcome = catch_unwind(AssertUnwindSafe(|| {
+            let from_file = read_params(&text);
+            let label = friendly(&text);
+            let (params, overwrite) = user_shader_edit(&src, &label);
+            let generated = generate(&params);
+            (from_file, label, params, overwrite, generated)
+        }));
+        let (from_file, label, params, overwrite, generated) = outcome.expect("edit of // shader-desk: [] panicked");
+        assert!(from_file.is_none());
+        assert_eq!(label, "bad array");
+        assert!(!overwrite);
+        assert_eq!(params["name"], json!("bad array custom"));
+        assert_eq!(params["curvature"], defaults()["curvature"]);
+        assert_eq!(params["scan_strength"], defaults()["scan_strength"]);
+        let meta = generated_meta(&generated);
+        assert!(meta.is_object());
+        assert_eq!(meta["name"], json!("bad array custom"));
+        assert!(!generated.contains("// shader-desk: []"));
+
+        let utf8 = dir.0.join("bad-utf8.glsl");
+        fs::write(&utf8, b"// shader-desk: []\xff\n").unwrap();
+        let utf8_text = utf8.to_str().unwrap().to_string();
+        assert!(catch_unwind(AssertUnwindSafe(|| read_params(&utf8_text))).expect("invalid utf-8 panicked").is_none());
+        let src = fs::read_to_string(&utf8).unwrap_or_default();
+        let (params, overwrite) = user_shader_edit(&src, "broken");
+        assert!(!overwrite);
+        assert_eq!(params["name"], json!("broken custom"));
+
+        let ok = dir.0.join("amber-tube.glsl");
+        fs::write(&ok, b"// shader-desk: {\"name\":\"Amber Tube\",\"phosphor\":\"amber\",\"curvature\":false}\n").unwrap();
+        let ok_text = ok.to_str().unwrap();
+        let loaded = read_params(ok_text).expect("valid object");
+        assert!(loaded.is_object());
+        assert_eq!(friendly(ok_text), "Amber Tube");
+        let src = fs::read_to_string(&ok).unwrap();
+        let (params, overwrite) = user_shader_edit(&src, "Amber Tube");
+        assert!(overwrite);
+        assert_eq!(params["name"], json!("Amber Tube"));
+        assert_eq!(params["phosphor"], json!("amber"));
+        assert_eq!(params["curvature"], json!(false));
+        assert_eq!(params["scanlines"], defaults()["scanlines"]);
+        assert_eq!(params["bloom_amt"], defaults()["bloom_amt"]);
     }
 }
 
